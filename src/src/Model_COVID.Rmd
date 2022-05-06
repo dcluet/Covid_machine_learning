@@ -1,0 +1,437 @@
+---
+title: "Model COVID"
+author: "Cluet David"
+date: "04/03/2022"
+output: pdf_document
+
+params:
+  folder:
+    label: 'Path to the folder to analyze'
+    value: '/home/dcluet/Bureau/Programmes/2022_Covid_Multinomial/src/data'
+    input: text
+
+  training:
+    label: "Training set:"
+    value: 70
+    input: slider
+    min: 30
+    max: 80
+    step: 1
+
+  correction:
+    label: "Sampling correction method:"
+    value: "down"
+    choices: [raw, down, up, smote]
+---
+
+```{r setup, include=FALSE}
+# Setting for best output layout
+knitr::opts_chunk$set(echo = FALSE,
+                      comment = NA,
+                      warning = FALSE,
+                      message = FALSE)
+folder = params$folder
+```
+
+
+```{r libraries}
+packages <- c('reticulate',
+              'ggplot2',
+              'knitr',
+              'tidyverse',
+              'caret',
+              'nnet',
+              'knitr')
+
+libraries <- function(packages){
+  # Checks if packages are here, download if necessary and load them
+  for (package in packages){
+    # Checks if package is installed
+    if(!require(package,
+                character.only=TRUE)){
+      # If package does not exist, then it will install
+      install.packages(package,
+                       dependencies=TRUE)
+      # Loads package
+      library(package,
+              character.only=TRUE)
+    }
+  }
+}
+
+# Configure the R session
+libraries(packages)
+```
+
+\newpage
+# Experimental setup
+```{python}
+# Python libraries
+import sys
+import pandas as pd
+
+# Calls
+# py$my_variable
+# r.my_variable
+```
+
+```{python functions}
+from python3.covidfunctions import build_database
+```
+
+```{python thresholds_and_samples}
+from python3.covid_dicts import df_treshold, df_variability, dict_samples
+```
+
+```{r table1}
+kable(py$df_treshold, caption='Linear treshold used to binarize the channels')
+
+# Error bars represent standard error of the mean
+plt1 <- ggplot(py$df_variability,
+               aes(x=channel,
+                   y=mean)) + 
+  geom_bar(position=position_dodge(),
+           stat='identity',
+           fill='turquoise4') +
+  geom_errorbar(aes(ymin=mean-std,
+                    ymax=mean+std),
+                width=.2, # Width of the error bars
+                position=position_dodge(.9)) +
+  ggtitle('Experimental thresholds variations') +
+  theme_bw() +
+  theme(aspect.ratio=1)
+
+ggsave(file.path(folder,
+                 'Thresholds.jpg'))
+```
+
+```{r, graph_threshold, fig.show = 'hold', out.width = '50%', fig.align = 'center', fig.cap = 'Experimental thresholds'}
+include_graphics(file.path(folder,
+                           'Thresholds.jpg'))
+```
+
+
+\newpage
+
+```{python patients_sample}
+df_db, df_summary = build_database(r.folder,
+                                   '.csv')
+```
+
+```{r present_db}
+df_db <- py$df_db
+print(summary(df_db))
+df_summary <- py$df_summary
+kable(df_summary, row.names=NA)
+```
+
+
+
+```{r graphs_test}
+list_path <- c()
+for (marker in c('IFNl', 'CD83', 'PDL1', 'IFNa', 'CD80')){
+  for (act in c('Mock', 'SARS', 'Agonist')){
+    df_summary_temp = df_summary[df_summary['Activation'] == act,]        
+    plt <- ggplot(df_summary_temp,
+                  aes_string(x='Activation',
+                             y=marker,
+                             color='Cohorte',
+                             shape='Status')) +
+      geom_point() +
+      geom_jitter() +
+      geom_boxplot(aes_string(x='Activation',
+                              y=marker,
+                              group='Cohorte'),
+                   alpha=0.5) +
+      theme_bw() +
+      theme(aspect.ratio=1)+ 
+      ggtitle(paste(marker,
+                    act,
+                    sep = ' '))
+
+    path <- file.path(folder,
+                      paste0(marker,
+                             '_',
+                             act,
+                             '.jpg'))
+    list_path <- c(list_path, path)
+    ggsave(path)    
+        
+  }
+
+}
+```
+
+```{r, graph_cohortes, fig.show = 'hold', out.width = '30%', fig.align = 'center', fig.cap = 'Cohorts and Markers'}
+include_graphics(list_path) 
+```
+
+```{r impact_pDcs}
+list_path <- c()
+max <- max(df_summary$pDCs)
+for (marker in c('pDCs', 'IFNl', 'CD83', 'PDL1', 'IFNa', 'CD80')){
+  for (act in c('Mock', 'SARS', 'Agonist')){
+  df_summary_temp = df_summary[df_summary['Activation'] == act,] 
+  plt <- ggplot(df_summary,
+                aes_string(x='Status',
+                           y=marker,
+                           color='Status')) +
+        geom_point() +
+        geom_jitter() +
+        geom_boxplot(aes_string(x='Status',
+                                y=marker),
+                     alpha=0.5) +
+        
+        theme_bw() +
+        theme(aspect.ratio=1) + 
+        ggtitle(paste(marker,
+                      act))
+    path <- file.path(folder,
+                      paste0(marker,
+                             '_',
+                             act,
+                             '.jpg'))
+    list_path <- c(list_path, path)
+    ggsave(path) 
+  }
+}  
+```
+
+
+```{r, graph_pDCs, fig.show = 'hold', out.width = '30%', fig.align = 'center', fig.cap = 'Cohorts and Markers'}
+include_graphics(list_path) 
+```
+
+\newpage
+## GradientBoosting
+
+```{python GradientBoosting}
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import LeaveOneGroupOut
+from sklearn.compose import make_column_selector as selector
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_validate
+print(df_db.columns)
+(data,
+ cohortes,
+ target) = (df_db.drop(['Status', 'Cohorte', 'Patient', 'Severity'], axis=1),
+            df_db['Cohorte'],
+            df_db['Severity'])
+
+print(target.describe())
+(data_train,
+ data_test,
+ target_train,
+ target_test) = train_test_split(data,
+                                 target,
+                                 shuffle=True,   # To remove structure
+                                 random_state=666)
+
+# Handle categorical columns (i.e. activation)
+categorical_columns_selector = selector(dtype_include=object)
+categorical_columns = categorical_columns_selector(data)
+categorical_preprocessor = OrdinalEncoder(handle_unknown='use_encoded_value',
+                                          unknown_value=-1)
+
+preprocessor = ColumnTransformer([('cat_preprocessor',
+                                   categorical_preprocessor,
+                                   categorical_columns)],
+                                   remainder='passthrough',
+                                   sparse_threshold=0)
+
+model = Pipeline([('preprocessor',
+                   preprocessor),
+                  ('classifier',
+                   GradientBoostingClassifier(random_state=666))
+                  ])
+cv = LeaveOneGroupOut()
+cv_scores = cross_validate(model,
+                           data,
+                           target,
+                           groups=cohortes,
+                           cv=cv,
+                           scoring=['accuracy',
+                                    'balanced_accuracy',
+                                    'neg_mean_absolute_error'])
+
+print(cv_scores)
+
+scores_df = pd.DataFrame({'accuracy': cv_scores['test_accuracy'],
+                         'balanced accuracy': cv_scores['test_balanced_accuracy'],
+                         'mean absolute error': - cv_scores['test_neg_mean_absolute_error']})
+                         
+print(scores_df)
+
+
+```
+```{python}
+model.fit(data_train, target_train)
+accuracy = model.score(data_test, target_test)
+model_name = model.__class__.__name__
+
+print(f'The test accuracy using a {model_name} is '
+      f'{accuracy:.3f}')
+
+dict = {'features': data.columns,
+        'importance': model.steps[1][1].feature_importances_}
+df_display = pd.DataFrame(dict)
+```
+
+
+
+
+```{r ML}
+kable(py$df_display)
+
+```
+```{python}
+
+
+
+```
+
+
+\newpage
+## Linear Regression
+
+```{r prepare_db}
+df_db$Activation <- as.factor(df_db$Activation)
+df_db$Activation <- fct_relevel(df_db$Activation, 'Mock')
+df_db$Status <- as.factor(df_db$Status)
+df_db$Status <- fct_relevel(df_db$Status, 'healthy')
+```
+
+```{r train_model}
+fit_model <- function(sampling) {
+  # we compute 10 models with CV
+  ctrl <- trainControl(
+    method = "repeatedcv", 
+    number = 10, 
+    repeats = 10, 
+    verboseIter = FALSE,
+    sampling = sampling
+  )
+  # Due to difficulty to use mapping empty first we overprint 
+  if (sampling == "raw"){
+    ctrl <- trainControl(
+      method = "repeatedcv", 
+      number = 10, 
+      repeats = 10, 
+      verboseIter = FALSE
+    )
+  }
+  # the model with all the factors
+  caret::train(
+    Status ~ IFNl + CD83 + PDL1 + IFNa + CD80 + Activation + perc_pDCs,
+    data = train,
+    method = "multinom",
+    trControl = ctrl)
+}
+```
+
+```{r generate_sets}
+df_db <- na.omit(df_db)
+print(summary(df_db))
+
+index <- df_db %>%
+  pull(Status) %>% 
+  createDataPartition(p = params$training/100,
+                      list = FALSE)
+# Training set
+train <- df_db[index,]
+print(summary(train))
+# Test set
+test <- df_db[-index,]
+print(summary(test))
+```
+```{r modelling, results = 'hide'}
+# we test differents sampling correction to compensate the groups imbalance
+results <-
+  tibble(
+    sampling = c("raw", "up", "down", "smote")
+  ) %>% 
+  mutate(
+    # create the column models
+    models = map(sampling, fit_model)
+  )
+```
+
+```{r Display_results}
+results %>%
+  pull(models) %>% 
+  resamples(modelNames = (results %>% pull(sampling))) %>% 
+  bwplot()
+```
+
+```{r Process_results}
+results %>%
+  mutate(
+    pred_status = map(models, function(x){
+      predict(x, newdata = test, "raw")
+    }),
+    confusion = map(pred_status, function(x){
+      confusionMatrix(x, test$Status)
+    }),
+    confusion = map(confusion, function(x){
+      as_tibble(x$byClass, rownames = "Status") %>% 
+        mutate(
+          Status = str_remove(Status, "Class: ")
+        )
+    })
+  ) %>% 
+  unnest(confusion) %>% 
+  pivot_longer(cols = -c(sampling, models, pred_status, Status)) %>% 
+  ggplot() +
+  theme_classic() +
+  geom_point(aes( x = value, y = sampling, color = Status)) +
+  # Force all score to be displayed between 0 and 1
+  xlim(c(0, 1)) +
+  facet_wrap(~name, scale = "free_x")
+
+
+# Get p-values
+# print(fitted(model))
+```
+
+```{r cross_validation_1, results = 'hide'}
+# model results with best method methods
+model <- fit_model(params$correction)
+```
+
+```{r train_prediction}
+# Predicting the values for train dataset
+train$pred_status <- predict(model, newdata = train, 'raw')
+```
+
+```{r confusion_train}
+# Building classification table
+confusionMatrix(train$pred_status, train$Status)
+```
+
+
+
+```{r Cross_validation_2}
+test$pred_status <- predict(model, newdata = test, "raw")
+# harvest here
+```
+
+```{r confusion_test}
+
+# Building classification table
+confusionMatrix(test$pred_status, test$Status)
+```
+## \textcolor{teal}{Mutinomial regressions Coefficients}
+```{r raw_coeff}
+summary(model)$coefficients
+```
+
+
+
+
+```{python exit}
+#sys.exit('Modeling ended')
+```
+
